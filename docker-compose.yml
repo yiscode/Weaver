@@ -1,0 +1,16 @@
+version: "3.4"
+services:
+  weaviate:
+    image: semitechnologies/weaviate:latest
+    container_name: weaviate
+    ports:
+      - "9080:8080"   # REST API
+      - "50051:50051" # gRPC API
+    environment:
+      QUERY_DEFAULTS_LIMIT: 50
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      ENABLE_MODULES: none
+      AUTOSCHEMA_ENABLED: "false"
+      CLUSTER_HOSTNAME: "node1"   # 關鍵：給單節點一個 hostname
+    volumes:
+      - ./weaviate_data:/var/lib/weaviate

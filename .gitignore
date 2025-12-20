@@ -1,0 +1,8 @@
+/__pycache__
+/.venv
+/urls
+/weaviate_data
+.env
+*.jsonl
+*.yaml
+*.txt
