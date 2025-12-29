@@ -1,0 +1,202 @@
+diff --git a/rag_server_memory.py b/rag_server_memory.py
+--- a/rag_server_memory.py
++++ b/rag_server_memory.py
+@@
+-import os, json
++import os, json
++import hashlib
+@@
+ def ensure_schemas():
+@@
+  if not client.collections.exists("WorldState"):
+@@
+   vectorizer_config=None,
+  )
++
++ # PC registry: (session_id, player_key) -> pc_name
++ if not client.collections.exists("PCRegistry"):
++  client.collections.create(
++   name="PCRegistry",
++   properties=[
++    Property(name="session_id", data_type=DataType.TEXT),
++    Property(name="player_key", data_type=DataType.TEXT),
++    Property(name="pc_name", data_type=DataType.TEXT),
++    Property(name="timestamp", data_type=DataType.DATE),
++   ],
++   vectorizer_config=None,
++  )
+ ensure_schemas()
++
++# --- PC naming / registry helpers ---
++def _player_key_from_query(q) -> str:
++ # Prefer stable Discord user id; fallback to display name
++ return (getattr(q, "player_id", None) or getattr(q, "user_name", None) or "unknown").strip()
++
++def _hash_idx(seed: str, n: int) -> int:
++ if n <= 0:
++  return 0
++ h = hashlib.sha256(seed.encode("utf-8")).hexdigest()
++ return int(h[:8], 16) % n
++
++def _get_pc_from_registry(session_id: str, player_key: str) -> Optional[str]:
++ reg = client.collections.get("PCRegistry")
++ f = Filter.by_property("session_id").equal(session_id) & Filter.by_property("player_key").equal(player_key)
++ got = reg.query.fetch_objects(limit=1, filters=f).objects
++ if not got:
++  return None
++ nm = (got[0].properties.get("pc_name") or "").strip()
++ return nm or None
++
++def _upsert_pc_registry(session_id: str, player_key: str, pc_name: str):
++ reg = client.collections.get("PCRegistry")
++ f = Filter.by_property("session_id").equal(session_id) & Filter.by_property("player_key").equal(player_key)
++ reg.data.delete_many(where=f)
++ reg.data.insert(
++  properties={
++   "session_id": session_id,
++   "player_key": player_key,
++   "pc_name": pc_name,
++   "timestamp": utc_now_iso(),
++  },
++  vector=text_embedder.encode(pc_name),
++ )
++
++def _get_used_pc_names(session_id: str) -> set:
++ reg = client.collections.get("PCRegistry")
++ rf = Filter.by_property("session_id").equal(session_id)
++ regs = reg.query.fetch_objects(limit=300, filters=rf).objects
++ out = set()
++ for r in regs:
++  nm = (r.properties.get("pc_name") or "").strip()
++  if nm:
++   out.add(nm)
++ return out
++
++def _get_present_npc_names_from_state(latest_ws) -> set:
++ if not latest_ws:
++  return set()
++ s = latest_ws.properties.get("state_json") or "{}"
++ try:
++  data = json.loads(s)
++  names = data.get("npc_names") or []
++  return {str(x).strip() for x in names if str(x).strip()}
++ except Exception:
++  return set()
++
++def _pick_name_from_npc_db(session_id: str, player_key: str, latest_ws=None) -> Optional[str]:
++ # Use WorldLoreV2 where type == 'npc', and avoid:
++ # 1) other PCs in same session, 2) NPCs already present in this session's state
++ if not client.collections.exists("WorldLoreV2"):
++  return None
++ lore = client.collections.get("WorldLoreV2")
++ npc_filter = Filter.by_property("type").equal("npc")
++ objs = lore.query.fetch_objects(limit=250, filters=npc_filter).objects
++ candidates = []
++ for o in objs:
++  nm = (o.properties.get("name") or "").strip()
++  if nm:
++   candidates.append(nm)
++ if not candidates:
++  return None
++ used_pc = _get_used_pc_names(session_id)
++ present_npc = _get_present_npc_names_from_state(latest_ws)
++ banned = used_pc | present_npc
++ idx0 = _hash_idx(f"{session_id}|{player_key}", len(candidates))
++ for i in range(len(candidates)):
++  cand = candidates[(idx0 + i) % len(candidates)]
++  if cand not in banned:
++   return cand
++ # If unavoidable, at least don't collide with other PCs
++ for i in range(len(candidates)):
++  cand = candidates[(idx0 + i) % len(candidates)]
++  if cand not in used_pc:
++   return cand
++ return candidates[idx0]
+@@
+ class WorldQuery(BaseModel):
+  query: str
+  user_name: str = "Player"
++ player_id: Optional[str] = None  # Discord user id for stable per-player mapping
+  session_id: str = "default"
+  top_k: int = 5
+@@
+-def background_update_logic(session_id: str, new_content: str):
++def background_update_logic(session_id: str, new_content: str, pc_name: str = ""):
+@@
+- update_prompt = f"""
++ update_prompt = f"""
+ 你是一個世界觀數據提取器。請根據劇情更新 JSON 數據。
+-【警告】玩家名字是「{user_name}」，「{user_name}」的所有心理與動作嚴禁放入 "npc" 欄位。
++【警告】玩家顯示名是「{user_name}」，主角名字是「{pc_name or user_name}」。
++主角（{pc_name or user_name}）的所有心理與動作嚴禁放入 "npc" 欄位。
+ "npc" 欄位只紀錄非玩家的異想體或同事。
+ 【結構需求】
+ {{
++ "npc_names": ["非玩家角色姓名（只要名字）"],
+  "npc": ["非玩家角色的狀態"],
+  "places": ["場景描述"],
+  "items": ["物品描述"],
+  "events": ["事件摘要"]
+ }}
+@@
+   state_data = json.loads(json_str)
++
++  # Normalize npc_names (for name collision avoidance)
++  if "npc_names" not in state_data or not isinstance(state_data.get("npc_names"), list):
++   state_data["npc_names"] = []
++  cleaned = []
++  seen = set()
++  for x in state_data["npc_names"]:
++   s = str(x).strip()
++   if s and s not in seen and s != (pc_name or user_name):
++    seen.add(s)
++    cleaned.append(s)
++  state_data["npc_names"] = cleaned[:80]
+@@
+ @app.post("/world")
+ async def chat_world(q: WorldQuery, background_tasks: BackgroundTasks):
+@@
+  # 2.1) World state
+  ws_objs = ws_coll.query.fetch_objects(limit=20, filters=session_filter).objects
+  latest_ws = _pick_latest_worldstate(ws_objs)
+  ws_summary = latest_ws.properties.get("summary") if latest_ws else "初始狀態"
+  ws_summary = to_traditional_zh(ws_summary)
++
++ # 2.1.5) Resolve PC name for this player in this session
++ pkey = _player_key_from_query(q)
++ pc_name = _get_pc_from_registry(q.session_id, pkey)
++ if not pc_name:
++  pc_name = _pick_name_from_npc_db(q.session_id, pkey, latest_ws=latest_ws)
++ if not pc_name:
++  pc_name = f"無名者-{pkey[-4:]}"
++ _upsert_pc_registry(q.session_id, pkey, pc_name)
+@@
+- system_prompt = f"""
++ system_prompt = f"""
++【敘事視角（最高優先）】
++- 全文採第三人稱限知；主角一律稱「{pc_name}」。
++- 旁白敘事禁止使用「我、你、我們、你們」作主語；能省略主語就省略，否則用角色名／職稱／NPC名。
++- 允許對話出現我/你，但必須用「」標示；對話比例不超過全文 20%。
++
+  你是一位專精於「新本格派懸疑」與「克蘇魯風格」的資深 DM。
+@@
+- 請直接從玩家【{q.user_name}】目前的處境推進。請寫出至少 600 字、充滿電影鏡頭感的敘事。
++ 請直接從主角【{pc_name}】目前的處境推進。請寫出至少 600 字、充滿電影鏡頭感的敘事。
+@@
+- background_tasks.add_task(background_update_logic, q.session_id, response)
++ background_tasks.add_task(background_update_logic, q.session_id, response, pc_name)
+  return {
+@@
+ @app.post("/reset")
+ def reset_session(session_id: str = Query(...)):
+  try:
+@@
+   mem_coll.data.delete_many(where=Filter.by_property("session_id").equal(session_id))
++
++  # 3. 清理角色登錄（PCRegistry）
++  if client.collections.exists("PCRegistry"):
++   reg = client.collections.get("PCRegistry")
++   reg.data.delete_many(where=Filter.by_property("session_id").equal(session_id))
+   return {"msg": f"Session {session_id} has been completely wiped."}
+  except Exception as e:
+   return {"error": str(e)}

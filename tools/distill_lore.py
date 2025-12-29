@@ -7,7 +7,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 JAN_BASE_URL = "http://localhost:1337/v1"
 JAN_API_KEY = "my-secret-key"
-JAN_MODEL = "Llama-3_1-8B-Instruct-IQ4_XS"  # 你指定
+JAN_MODEL = "gemma-2-9b-it-abliterated-IQ4_XS"  # 你指定
 
 
 def sha256_text(s: str) -> str:

@@ -1,0 +1,31 @@
+{
+  "name": "generic_adventure",
+  "description": "泛用冒險風格，強調因果推進與感官描寫。",
+  "language": {
+    "locale": "zh-TW",
+    "forbid_second_person": true,
+    "forbid_first_person": true
+  },
+  "response": {
+    "min_chars": 250,
+    "max_chars": 450,
+    "choices_count": 3
+  },
+  "lore": {
+    "collection": "WorldLoreV2",
+    "max_results": 3
+  },
+  "style": {
+    "default_style": "泛用冒險",
+    "detection_rules": [
+      {
+        "keywords": ["公司", "收容", "異想體"],
+        "style": "腦葉驚悚"
+      },
+      {
+        "keywords": ["神祕", "石頭", "孩子"],
+        "style": "超現實神祕"
+      }
+    ]
+  }
+}

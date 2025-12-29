@@ -10,7 +10,7 @@ headers = {
 }
 
 payload = {
-    "model": "Llama-3_2-3B-Instruct-IQ4_XS",
+    "model": "gemma-2-9b-it-abliterated-IQ4_XS",
     "messages": [
         {"role": "system", "content": "你是一位黑暗奇幻敘事者"},
         {"role": "user", "content": "請寫一段關於黑暗儀式的故事"}
