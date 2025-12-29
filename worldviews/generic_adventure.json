@@ -18,14 +18,6 @@
   "style": {
     "default_style": "泛用冒險",
     "detection_rules": [
-      {
-        "keywords": ["公司", "收容", "異想體"],
-        "style": "腦葉驚悚"
-      },
-      {
-        "keywords": ["神祕", "石頭", "孩子"],
-        "style": "超現實神祕"
-      }
     ]
   }
 }
