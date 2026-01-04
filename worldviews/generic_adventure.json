@@ -8,12 +8,12 @@
   },
   "response": {
     "min_chars": 250,
-    "max_chars": 450,
-    "choices_count": 3
+    "max_chars": 600,
+    "choices_count":5
   },
   "lore": {
     "collection": "WorldLoreV2",
-    "max_results": 3
+    "max_results": 5
   },
   "style": {
     "default_style": "泛用冒險",

@@ -2,50 +2,80 @@ import json
 import re
 
 def clean_wiki_text(text):
-    # 1. 去除 HTML 標籤 (如 <span...>)
-    text = re.sub(r'<[^>]+>', '', text)
-    # 2. 去除模板 {{...}}
-    text = re.sub(r'\{\{.*?\}\}', '', text, flags=re.DOTALL)
-    # 3. 處理連結 [[A|B]] -> B, [[A]] -> A
+    # 1. 移除 Wiki 表格與 tabber 內容
+    text = re.sub(r'\{\|.*?\|\}', '', text, flags=re.DOTALL)
+    text = re.sub(r'<tabber>.*?</tabber>', '', text, flags=re.DOTALL)
+
+    # 2. 處理連結 [[A|B]] -> B
     text = re.sub(r'\[\[(?:[^|\]]*\|)?([^\]]+)\]\]', r'\1', text)
-    # 4. 去除多餘的括號和標題符號
-    text = text.replace('==', '').replace("'''", "").replace("''", "")
-    # 5. 合併多餘換行
-    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # 3. 移除 HTML 標籤與內部的註釋
+    text = re.sub(r'', '', text, flags=re.DOTALL)
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # 4. 移除 Wiki 模板屬性名稱 (例如 |name=, |voice=)
+    text = re.sub(r'\|\s*\w+\s*=', ' ', text)
+
+    # 5. 移除格式符號
+    text = text.replace("'''", "").replace("''", "").replace('==', '')
+
+    # 6. 暴力清理剩餘的大括號與特殊標點
+    text = text.replace('{', '').replace('}', '').replace(';', '').replace('\t', ' ')
+
+    # 7. 移除換行並壓縮空格
+    text = text.replace('\n', ' ')
+    text = re.sub(r'\s+', ' ', text)
+    # 針對 Ruby 標籤的優化：只保留第一個參數（漢字）
+    # 範例：{{ruby|十面埋伏|...}} -> 十面埋伏
+    text = re.sub(r'\{\{ruby\|([^|]+)\|[^}]+\}\}', r'\1', text)
+
     return text.strip()
 
-def chunk_data(input_file="pm_lore_final.jsonl", output_file="pm_lore_cleaned.jsonl"):
+def chunk_text_with_overlap(text, chunk_size=800, overlap=150):
+    chunks = []
+    start = 0
+    # 如果 text 長度小於 chunk_size，直接回傳
+    if len(text) <= chunk_size:
+        return [text]
+
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        chunks.append(chunk)
+        # 如果已經處理到結尾，就跳出
+        if end >= len(text):
+            break
+        start += (chunk_size - overlap)
+    return chunks
+
+def chunk_data(input_file="pm_lore_final.jsonl", output_file="DarkSouls.jsonl"):
     with open(input_file, "r", encoding="utf-8") as f, \
          open(output_file, "w", encoding="utf-8") as out:
         for line in f:
             data = json.loads(line)
-            raw_text = data["text_zh"]
+            name = data.get("name", "未知主題")
+            raw_text = data.get("text_zh", "")
+
+            # 1. 執行深度清洗
             cleaned_text = clean_wiki_text(raw_text)
 
-            # 如果文字太長 (> 1000字)，進行簡單切分
-            if len(cleaned_text) > 1000:
-                paragraphs = cleaned_text.split('\n\n')
-                current_chunk = ""
-                chunk_id = 0
-                for p in paragraphs:
-                    if len(current_chunk) + len(p) < 1000:
-                        current_chunk += p + "\n\n"
-                    else:
-                        new_data = data.copy()
-                        new_data["id"] = f"{data['id']}_{chunk_id}"
-                        new_data["text_zh"] = current_chunk.strip()
-                        out.write(json.dumps(new_data, ensure_ascii=False) + "\n")
-                        current_chunk = p + "\n\n"
-                        chunk_id += 1
-                if current_chunk:
-                    new_data = data.copy()
-                    new_data["id"] = f"{data['id']}_{chunk_id}"
-                    new_data["text_zh"] = current_chunk.strip()
-                    out.write(json.dumps(new_data, ensure_ascii=False) + "\n")
-            else:
-                data["text_zh"] = cleaned_text
-                out.write(json.dumps(data, ensure_ascii=False) + "\n")
+            # 2. 如果清洗後沒內容就跳過
+            if len(cleaned_text) < 10: continue
+
+            # 3. 使用重疊切分
+            # 注意：因為換行符被拿掉了，Prefix 也要跟著拿掉換行
+            prefix = f"關於【{name}】的設定資料： "
+
+            # 設定切分長度
+            chunks = chunk_text_with_overlap(cleaned_text, chunk_size=800, overlap=100)
+
+            for i, chunk in enumerate(chunks):
+                new_data = data.copy()
+                new_data["id"] = f"{data['id']}_{i}"
+                # 注入上下文前綴，保持長字串格式
+                new_data["text_zh"] = prefix + chunk
+                out.write(json.dumps(new_data, ensure_ascii=False) + "\n")
 
 if __name__ == "__main__":
     chunk_data()
-    print("✅ 清洗與切分完成！現在可以使用 pm_lore_cleaned.jsonl 進行索引了。")
+    print("✅ 深度清洗完成：已移除所有 { } 與換行符，轉為長字串格式。")

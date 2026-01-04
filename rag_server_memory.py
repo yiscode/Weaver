@@ -19,6 +19,40 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 
+client = None
+text_embedder = None
+llm = None
+def init_engines():
+    global client, text_embedder, llm
+
+    log.info("🛠️ 正在初始化核心引擎...")
+
+    # 1. Weaviate client
+    client = weaviate.connect_to_local(
+        host=os.getenv("WEAVIATE_HOST", "localhost"),
+        port=9080,
+        grpc_port=50051,
+        skip_init_checks=True,
+    )
+    log.info(f"🔗 Weaviate 連線就緒")
+
+    # 2. Embedding Model (強制使用 CPU 減少與 Indexer 的顯存衝突)
+    log.info(f"🧠 載入 Embedding 模型 (BGE-M3)...")
+    text_embedder = SentenceTransformer("BAAI/bge-m3", device="cpu")
+
+    # 3. LLM 設定
+    llm = ChatOpenAI(
+        base_url=LLM_URL,
+        api_key="my-secret-key",
+        model=LLM_MODEL,
+        temperature=0.75,
+        max_tokens=650,
+        top_p=0.9,
+        frequency_penalty=1.4,
+        presence_penalty=1.1,
+    )
+    log.info(f"🚀 Weaver Engine 啟動完成：(Model: {LLM_MODEL})")
+
 # === Logging 設定 ===
 logging.basicConfig(
     level=logging.INFO,
@@ -31,29 +65,6 @@ log = logging.getLogger("weaver_rag")
 LLM_URL = os.getenv("LLM_URL", "http://localhost:1337/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "gemma-2-9b-it-abliterated-IQ4_XS")
 DEBUG_TOKEN = "weaver_admin_2025"
-
-# Weaviate client（同步版）
-client = weaviate.connect_to_local(
-    host=os.getenv("WEAVIATE_HOST", "localhost"),
-    port=9080,
-    grpc_port=50051,
-    skip_init_checks=True,
-)
-
-log.info(f"🚀 Weaver Engine 啟動：多世界觀 RAG (Model: {LLM_MODEL})")
-
-text_embedder = SentenceTransformer("BAAI/bge-m3")
-
-llm = ChatOpenAI(
-    base_url=LLM_URL,
-    api_key="my-secret-key",
-    model=LLM_MODEL,
-    temperature=0.75,
-    max_tokens=650,
-    top_p=0.9,
-    frequency_penalty=1.4,
-    presence_penalty=1.1,
-)
 
 app = FastAPI(title="Multi-Worldview RAG Server")
 
@@ -271,7 +282,7 @@ def background_update_logic(
 {{
   "summary": "單句摘要",
   "timeline_append": ["事件1"],
-  "characters_update": [{{"name": "巴耶爾", "state": "狀態描述"}}],
+  "characters_update": [{{"name": "角色名", "state": "狀態描述"}}],
   "flags_update": []
 }}
 
@@ -386,7 +397,7 @@ class WorldQuery(BaseModel):
     user_name: str = "Player"
     player_id: Optional[str] = None
     session_id: str = "default"
-    worldview: str = "generic_adventure"
+    worldview: str = "moonproject"
 
 
 class WorldResponse(BaseModel):
@@ -417,100 +428,87 @@ def get_state(session_id: str = Query(...)):
     )
     return {"session_id": session_id, "state": state}
 
-
 @app.post("/world", response_model=WorldResponse)
 async def chat_world(q: WorldQuery, background_tasks: BackgroundTasks):
-    # 0. 載入世界觀設定
-    log.info(
-        f"[World] Request: session_id={q.session_id} user={q.user_name} "
-        f"worldview={q.worldview} query={q.query}"
-    )
+    # --- 0. 載入世界觀 ---
     try:
         worldview_cfg = worldview_manager.load(q.worldview)
-        log.info(f"[World] Worldview loaded: {worldview_cfg.get('name','?')}")
     except ValueError as e:
-        log.error(f"[World] Worldview load error: {e}")
+        log.error(f"[World] 找不到世界觀設定: {q.worldview}")
         raise HTTPException(status_code=400, detail=str(e))
 
-    ws_coll = client.collections.get("WorldState")
-
-    # 1. 身分與 PC 名稱
+    # --- 1. 基礎資訊準備 ---
     binding_key = _generate_binding_key(q.session_id, q.player_id or q.user_name)
-    bracket_match = re.search(r"[\[【](.*?)[\]】]", q.query)
-    if bracket_match:
-        pc_name = bracket_match.group(1).strip()
-        _upsert_pc_name(q.session_id, binding_key, pc_name)
-    else:
-        pc_name = _get_pc_name(q.session_id, binding_key) or "主角"
-
-    log.info(f"[World] PC resolved: pc_name={pc_name} binding_key={binding_key}")
-
-    # 2. 讀取世界狀態
+    pc_name = _get_pc_name(q.session_id, binding_key) or "主角"
     ws_obj = _get_state_obj(q.session_id)
-    if ws_obj:
-        state = json.loads(ws_obj.properties.get("state_json", "{}"))
-    else:
-        state = _empty_state()
-
+    state = json.loads(ws_obj.properties.get("state_json", "{}")) if ws_obj else _empty_state()
     ws_summary = _summarize_state_for_prompt(state)
-    log.info(
-        f"[World] Current summary: {ws_summary} | "
-        f"timeline_len={len(state.get('timeline', []))} "
-        f"flags={list(state.get('flags', {}).keys())}"
-    )
 
-    # 3. RAG：依世界觀設定檢索 Lore
+    # --- 2. 核心 RAG：手寫優先 + 比例檢索 ---
     lore_cfg = worldview_cfg.get("lore", {})
     lore_collection_name = lore_cfg.get("collection", "WorldLoreV2")
-    lore_limit = int(lore_cfg.get("max_results", 3))
+    lore_limit = int(lore_cfg.get("max_results", 6))
+    weights = lore_cfg.get("weights", {})
 
     lore_text = ""
-    detected_style = worldview_cfg.get("style", {}).get("default_style", "泛用冒險")
 
-    if client.collections.exists(lore_collection_name):
-        log.info(f"[World] Using lore collection={lore_collection_name}")
-        lore_coll = client.collections.get(lore_collection_name)
-
-        recent_events = " / ".join(state.get("timeline", [])[-3:])
-        flags_str = ", ".join(
-            [k for k, v in state.get("flags", {}).items() if v]
-        )
-
-        search_str = f"{ws_summary} {recent_events} {flags_str} {q.query}"
-        log.info(f"[World] RAG search_str={search_str[:200]}")
-        vector = text_embedder.encode(search_str)
-        log.info(f"[World] RAG vector shape={getattr(vector, 'shape', None)}")
-
-        lore_res = lore_coll.query.near_vector(
-            near_vector=vector,
-            limit=lore_limit
-        ).objects
-        log.info(f"[World] RAG hits={len(lore_res)}")
-
-        if lore_res:
-            lore_text = "\n".join(
-                [f"- 設定內容：{r.properties.get('text_zh', '')}" for r in lore_res]
-            )
-            first_lore = lore_res[0].properties.get("text_zh", "")
-            detected_style = detect_style_from_lore(worldview_cfg, first_lore)
-            log.info(f"[World] Detected style={detected_style}")
+    # A. 處理自定義手寫設定 (允許為空)
+    custom_static = lore_cfg.get("custom_static_lore", [])
+    if custom_static:
+        log.info(f"[RAG] 注入自定義手寫設定，共 {len(custom_static)} 條")
+        lore_text += "### 核心世界觀準則 (優先遵循):\n"
+        for idx, line in enumerate(custom_static):
+            lore_text += f"{idx+1}. {line}\n"
+        lore_text += "\n"
     else:
-        log.warning(f"[World] Lore collection not exists: {lore_collection_name}")
+        log.info("[RAG] custom_static_lore 為空，跳過手寫設定注入")
 
-    # 4. 因果指令（保持你的核心思想）
-    causal_logic = f"""
-玩家目前的動作或問題：『{q.query}』。
-目前所處的情境摘要：『{ws_summary}』。
+    # B. 處理資料庫檢索 (Vector Lore)
+    if client.collections.exists(lore_collection_name):
+        lore_coll = client.collections.get(lore_collection_name)
+        search_str = f"{ws_summary} {q.query}"
+        vector = text_embedder.encode(search_str)
 
-寫作方針：
-- 禁止重覆描述玩家剛才的台詞或行動。
-- 著重「行動後產生的結果」、NPC 的反應、環境的變化。
-- 根據世界觀與 Lore，提供一個玩家尚未掌握的新線索。
-- 加入具體感官描寫（氣味、聲音、觸感、光線變化等）。
-""".strip()
+        db_hits_count = 0
+        if weights:
+            log.info(f"[RAG] 啟動權重比例檢索: {weights}")
+            lore_text += "### 背景相關設定:\n"
+            for tag, ratio in weights.items():
+                tag_limit = max(1, int(lore_limit * ratio))
+                res = lore_coll.query.near_vector(
+                    near_vector=vector,
+                    limit=tag_limit,
+                    filters=Filter.by_property("tags").contains_any([tag])
+                ).objects
 
-    # 5. 組裝 System Prompt
-    log.info("[World] Building system prompt...")
+                db_hits_count += len(res)
+                log.info(f"[RAG] 標籤 [{tag}] 檢索到 {len(res)} 筆 (配額: {tag_limit})")
+
+                for obj in res:
+                    content = obj.properties.get('text_zh', '')
+                    lore_text += f"- [{tag}] {content}\n"
+        else:
+            log.info("[RAG] 未偵測到權重設定，執行全域檢索")
+            res = lore_coll.query.near_vector(near_vector=vector, limit=lore_limit).objects
+            db_hits_count = len(res)
+            if res:
+                lore_text += "### 背景相關設定:\n"
+                for obj in res:
+                    lore_text += f"- {obj.properties.get('text_zh', '')}\n"
+
+        log.info(f"[RAG] 資料庫檢索完成，總計獲得 {db_hits_count} 筆參考資料")
+    else:
+        log.warning(f"[RAG] 警告：Collection {lore_collection_name} 不存在")
+
+    # --- 3. 偵測風格 ---
+    detected_style = detect_style_from_lore(worldview_cfg, lore_text)
+    log.info(f"[Style] 根據 Lore 內容偵測到敘事風格: {detected_style}")
+
+    # --- 4. 打印最終注入 Prompt 的 Lore (Debug 用) ---
+    log.debug(f"=== 最終注入 LLM 的 Lore 文本 ===\n{lore_text}\n================================")
+
+    # --- 5. 組裝與生成 ---
+    causal_logic = f"玩家目前的動作或問題：『{q.query}』。" # 簡化示例
     system_prompt = render_system_prompt(
         pc_name=pc_name,
         detected_style=detected_style,
@@ -520,35 +518,26 @@ async def chat_world(q: WorldQuery, background_tasks: BackgroundTasks):
         state=state,
     )
 
-    # 6. 生成內容
     try:
-        log.info("[World] Calling LLM...")
-        response = llm.invoke(
-            [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=f"玩家行動：{q.query}"),
-            ]
-        ).content
-        log.info(f"[World] LLM response head={response[:120].replace(chr(10),' ')}")
+        log.info(f"[LLM] 正在為 {pc_name} 生成回應...")
+        response_obj = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"玩家行動：{q.query}"),
+        ])
+        response = response_obj.content
+        log.info(f"[LLM] 生成成功，回應長度: {len(response)} 字")
     except Exception as e:
-        log.error(f"[World] LLM error: {e}", exc_info=True)
+        log.error(f"[LLM] 呼叫失敗: {e}")
         raise HTTPException(status_code=500, detail="LLM invocation failed")
 
     response = to_traditional_zh(response)
 
-    # 7. 背景更新世界狀態
+    # 背景更新
     background_tasks.add_task(
-        background_update_logic,
-        q.session_id,
-        response,
-        pc_name,
-        q.query,
-        binding_key,
+        background_update_logic, q.session_id, response, pc_name, q.query, binding_key
     )
-    log.info(f"[World] Response sent. pc_name={pc_name}")
 
     return WorldResponse(content=response, pc_name=pc_name, worldview=q.worldview)
-
 
 # === 維護接口 ===
 
@@ -568,6 +557,6 @@ def reset_session(session_id: str = Query(...)):
 
 if __name__ == "__main__":
     import uvicorn
-
+    init_engines()
     log.info("Starting uvicorn...")
     uvicorn.run(app, host="0.0.0.0", port=9527)

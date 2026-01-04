@@ -5,7 +5,7 @@ import time
 from urllib.parse import unquote
 
 def get_page_info_and_content(title):
-    base_url = "https://lobotomycorp.fandom.com/api.php"
+    base_url = "https://typemoon.fandom.com/api.php"
     # 使用 query + export 模式，這種模式對特殊字符標題最友善
     params = {
         "action": "query",
@@ -13,13 +13,21 @@ def get_page_info_and_content(title):
         "titles": title,
         "prop": "revisions|categories",
         "rvprop": "content", # 抓取原始碼
-        "redirects": 1
+        "redirects": 1,
+        "cllimit": "max"
     }
 
     try:
+
         res = requests.get(base_url, params=params).json()
+        # 處理重新導向的邏輯
+        if "query" in res and "redirects" in res["query"]:
+            real_title = res["query"]["redirects"][0]["to"]
+            print(f"(Redirect -> {real_title})", end=" ")
+
         pages = res.get("query", {}).get("pages", {})
         page_id = next(iter(pages))
+
 
         if page_id == "-1":
             return None, None
@@ -31,9 +39,17 @@ def get_page_info_and_content(title):
 
         # 簡單清洗：去掉 Wiki 的 [[ ]] 和 {{ }} 標籤
         import re
-        clean_text = re.sub(r'\{\{.*?\}\}', '', raw_text, flags=re.DOTALL)
-        clean_text = re.sub(r'\[\[(.*?)\|?.*?\]\]', r'\1', clean_text)
+# --- 改進清洗邏輯 ---
+        # 不要直接刪除樣板，改為提取裡面的文字，或者只刪除特定的系統標籤
+        clean_text = raw_text
+        # 只去掉 Wiki 連結符號，保留裡面的文字
+        clean_text = re.sub(r'\[\[(?:[^|\]]*\|)?([^\]]+)\]\]', r'\1', clean_text)
+        # 去掉 ''' (粗體)
         clean_text = clean_text.replace("'''", "").replace("''", "")
+        # 去掉 <ref> 標籤
+        clean_text = re.sub(r'<ref.*?>.*?</ref>', '', clean_text, flags=re.DOTALL)
+        # 去掉 HTML 註釋
+        clean_text = re.sub(r'', '', clean_text, flags=re.DOTALL)
 
         # 判定類型
         categories = [c["title"] for c in page_data.get("categories", [])]

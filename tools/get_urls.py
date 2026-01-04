@@ -1,7 +1,7 @@
 import requests
 
 def get_all_pages_via_api():
-    base_url = "https://lobotomycorp.fandom.com/api.php"
+    base_url = "https://typemoon.fandom.com/api.php"
     params = {
         "action": "query",
         "format": "json",
@@ -22,7 +22,7 @@ def get_all_pages_via_api():
                 continue
 
             # 組成完整網址
-            url = f"https://lobotomycorp.fandom.com/wiki/{title.replace(' ', '_')}"
+            url = f"https://typemoon.fandom.com/wiki/{title.replace(' ', '_')}"
             all_links.append(url)
 
         # 檢查是否還有下一頁 (Pagination)

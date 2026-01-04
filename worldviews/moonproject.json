@@ -1,0 +1,39 @@
+{
+  "name": "Project Moon x Holy Grail",
+  "description": "以腦葉公司為背景的聖杯戰爭。強調策略、犧牲與人性掙扎。",
+  "language": {
+    "locale": "zh-TW",
+    "forbid_second_person": true,
+    "forbid_first_person": true
+  },
+  "response": {
+    "min_chars": 350,
+    "max_chars": 700,
+    "choices_count": 4
+  },
+  "lore": {
+    "collection": "WorldLoreV2",
+    "max_results": 10,
+    "weights": {
+      "ProjectMoon": 0.6,
+      "Fate": 0.4
+    }
+  },
+  "style": {
+    "default_style": "冷峻、充滿心理壓迫感的敘事風格。著重於角色在策略對峙中的內心活動，以及犧牲與人性掙扎。",
+    "detection_rules": [
+      {
+        "style": "異想體收容失效 (Abnormality Breach)",
+        "keywords": ["警報", "收容", "異想體", "侵蝕", "物理法則崩壞", "認知濾網", "ALEPH", "WAW"]
+      },
+      {
+        "style": "聖杯戰鬥 (Grail War Conflict)",
+        "keywords": ["令咒", "從者", "魔力燃燒", "固有結界", "職階", "寶具"]
+      },
+      {
+        "style": "人性崩潰 (Mental Breakdown)",
+        "keywords": ["發瘋", "尖叫", "絕望", "崩潰", "扭曲", "恐懼", "血跡"]
+      }
+    ]
+  }
+}
